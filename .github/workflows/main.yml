@@ -1,0 +1,179 @@
+name: 自动更新
+
+on:
+ workflow_dispatch:
+ schedule:
+ - cron: '0 16 * * *'
+ push:
+  branches:
+  - '*'
+
+env:
+#--------------------
+  # 备恢文件
+  bhwj: 0
+ # -------------------
+  # 获取上游
+  hqsy: 0
+ # -------------------
+  # 混淆文件
+  hxwj: 0
+ # -------------------
+  # 删除 .gitignore 文件
+  scwj: 1
+  # 清理目录
+  qlml: 1
+  # 清理非必要文件
+  qlwj: 1
+  # 下载文件
+  xzwj: 1
+
+# --------------------
+
+permissions:
+ contents: write
+
+concurrency:
+ group: ${{github.workflow}}-${{github.ref}}
+ cancel-in-progress: true
+
+jobs:
+ zdgx:
+  if: github.actor != 'github-actions[bot]' && !contains(github.event.head_commit.message, '运行成功')
+  runs-on: ubuntu-latest
+  steps:
+  
+  - name: 检出仓库
+    uses: actions/checkout@v4
+    with:
+     fetch-depth: 0
+     token: ${{ secrets.pat }}
+  
+  - name: 清理非必要文件
+    if: env.qlwj == '1'
+    run: |
+     shopt -s extglob
+     rm -rf !(.github|README.md)
+  
+  - name: 清理 .github 目录
+    if: env.qlml == '1'
+    run: |
+     find .github -mindepth 1 ! -path ".github/workflows" ! -path ".github/workflows/*" -exec rm -rf {} +
+     find .github/workflows/ -mindepth 1 ! -name "main.yml" -exec rm -rf {} +
+  
+  - name: 删除 .gitignore 文件
+    if: env.scwj == '1'
+    run: |
+     if [ -f .gitignore ]; then
+      rm -f .gitignore && echo "成功删除"
+     else
+      echo ".gitignore 文件不存在"
+     fi
+  
+  - name: 提交并推送更新
+    run: |
+     git add .
+     git status
+     git commit -m '运行成功' || true
+     git push origin ${{github.ref}} --force
+  
+  - name: 安装 Node.js
+    uses: actions/setup-node@v3
+    with:
+     node-version: lts/*
+  
+  - name: 安装混淆工具
+    run: npm install -g javascript-obfuscator
+  
+  - name: 设置 Git 用户信息
+    run: |
+     git config --global user.name "github-actions[bot]"
+     git config --global user.email "github-actions[bot]@users.noreply.github.com"
+  
+  - name: 备份工作流文件
+    run: cp .github/workflows/main.yml /tmp/main.yml
+  
+  - name: 设置 Git 远程地址
+    run: git remote set-url origin https://${{github.actor}}:${{secrets.pat}}@github.com/${{github.repository}}.git
+  
+  - name: 获取上游仓库信息
+    if: env.hqsy == '1'
+    run: |
+     RESPONSE=$(curl -s -H "Authorization: token ${{secrets.pat}}" "https://api.github.com/repos/${{github.repository}}")
+     UPSTREAM_REPO=$(echo "$RESPONSE" | jq -r '.parent.full_name')
+     DEFAULT_BRANCH=$(curl -s -H "Authorization: token ${{secrets.pat}}" "https://api.github.com/repos/$UPSTREAM_REPO" | jq -r '.default_branch')
+     git remote get-url upstream || git remote add upstream https://${{secrets.pat}}@github.com/$UPSTREAM_REPO.git
+     git fetch upstream
+     git reset --hard upstream/$DEFAULT_BRANCH
+  
+  - name: 恢复工作流文件
+    run: |
+     mkdir -p .github/workflows
+     cp /tmp/main.yml .github/workflows/main.yml
+  
+  - name: 自定义备份文件
+    if: env.bhwj == '1'
+    run: cp _worker.js /tmp/_worker.js
+  
+  - name: 二次清理非必要文件
+    if: env.qlwj == '1'
+    run: |
+     shopt -s extglob
+     rm -rf !(.github|README.md|_worker.js)
+  
+  - name: 二次清理 .github 目录
+    if: env.qlml == '1'
+    run: |
+     find .github -mindepth 1 ! -path ".github/workflows" ! -path ".github/workflows/*" -exec rm -rf {} +
+     find .github/workflows/ -mindepth 1 ! -name "main.yml" -exec rm -rf {} +
+  
+  - name: 删除文件
+    if: env.scwj == '1'
+    run: |
+     if [ -f .gitignore ]; then
+      rm -f .gitignore && echo "成功删除"
+     else
+      echo ".gitignore 文件不存在"
+     fi
+  
+  - name: 自定义恢复文件
+    if: env.bhwj == '1'
+    run: cp /tmp/_worker.js _worker.js
+  
+  - name: 下载上游 Release 文件
+    if: env.xzwj == '1'
+    run: |
+     RESPONSE=$(curl -s -H "Authorization: token ${{secrets.pat}}" https://api.github.com/repos/${{github.repository}})
+     UPSTREAM_REPO=$(echo "$RESPONSE" | jq -r '.parent.full_name')
+     AUTHOR=$(echo "$UPSTREAM_REPO" | cut -d '/' -f 1)
+     REPO=$(echo "$UPSTREAM_REPO" | cut -d '/' -f 2)
+     
+     DOWNLOAD_URL=$(curl -s https://api.github.com/repos/$AUTHOR/$REPO/releases/latest \
+     | jq -r '.assets[] | select(.name | test("worker\\.js$")) | .browser_download_url')
+
+     if [[ "$DOWNLOAD_URL" == *"_worker.js" ]]; then
+       curl -sSL -o _worker.js "$DOWNLOAD_URL"
+     elif [[ "$DOWNLOAD_URL" == *"worker.js" ]]; then
+       curl -sSL "$DOWNLOAD_URL" -o _worker.js
+     else
+       echo "未找到匹配的 worker.js 或 _worker.js 资源"
+       exit 1
+     fi
+  
+  - name: 混淆 _worker.js
+    if: env.hxwj == '1'
+    run: |
+     javascript-obfuscator _worker.js --output _worker.js \
+     --compact true \
+     --identifier-names-generator hexadecimal \
+     --rename-globals true \
+     --string-array true \
+     --transform-object-keys true \
+     --unicode-escape-sequence true
+  
+  - name: 提交并推送更新
+    run: |
+     git add .
+     git status
+     git commit -m '运行成功' || true
+     git push origin ${{github.ref}} --force
